@@ -1,0 +1,1 @@
+"""Shopzetu package."""
