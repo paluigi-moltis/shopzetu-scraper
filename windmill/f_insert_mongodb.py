@@ -2,11 +2,10 @@
 Step 3 — Insert scraped products into MongoDB.
 
 Windmill script (type: python). Receives the output of Step 2
-(f_scrape_collection) and upserts all products into MongoDB.
+(f_scrape_collection) and bulk-inserts all products into MongoDB.
 
-Products are deduplicated by ``product_id`` (Shopify GID). When the same
-product appears under multiple category paths (e.g. in two collections),
-paths are aggregated into a ``categories`` array via ``$addToSet``.
+Simple insert — no index management, no upsert logic.
+For weekly re-runs, delete the collection beforehand or run a cleanup step.
 
 Windmill variables required:
     u/paluigi/mongo_uri   — MongoDB connection string
@@ -18,7 +17,7 @@ Windmill flow:
 from datetime import date
 from typing import Any
 
-from pymongo import ASCENDING, MongoClient, UpdateOne
+from pymongo import MongoClient
 
 # ─── Windmill variables ───
 try:
@@ -42,7 +41,7 @@ def main(
     product_count: int,
     products: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Upsert a batch of scraped products into MongoDB.
+    """Bulk-insert a batch of scraped products into MongoDB.
 
     Parameters (all from Step 2 output):
         category, subcategory, type, handle  — metadata
@@ -53,49 +52,35 @@ def main(
     db = client[DB_NAME]
     coll = db[COLLECTION_NAME]
 
-    # Ensure indexes (idempotent)
-    coll.create_index([("product_id", ASCENDING)], unique=True)
-    coll.create_index([("handle", ASCENDING)])
-    coll.create_index([("brand", ASCENDING)])
-
     today = date.today().isoformat()  # "2026-08-07"
 
-    ops: list[UpdateOne] = []
-
+    docs = []
     for product in products:
-        product_id = product["product_id"]
-        # Separate the category_path so it goes into the aggregate array
+        # Flatten category_path into top-level fields for easy querying
         cat_path = product.pop("category_path", None)
-
-        # Add scraped_at as date string
-        product["scraped_at"] = today
-
-        update_doc: dict[str, Any] = {"$set": product}
         if cat_path:
-            update_doc["$addToSet"] = {"categories": cat_path}
+            product["category"] = cat_path.get("category")
+            product["subcategory"] = cat_path.get("subcategory")
+            product["type"] = cat_path.get("type")
 
-        ops.append(UpdateOne({"product_id": product_id}, update_doc, upsert=True))
+        product["scraped_at"] = today
+        docs.append(product)
 
-    if ops:
-        result = coll.bulk_write(ops, ordered=False)
-        summary = {
-            "handle": handle,
-            "category": category,
-            "subcategory": subcategory,
-            "type": type,
-            "input_count": product_count,
-            "matched": result.matched_count,
-            "upserted": result.upserted_count,
-            "modified": result.modified_count,
-            "total_in_db": coll.count_documents({}),
-        }
+    if docs:
+        coll.insert_many(docs, ordered=False)
+        total_in_db = coll.count_documents({})
     else:
-        summary = {
-            "handle": handle,
-            "input_count": 0,
-            "total_in_db": coll.count_documents({}),
-        }
+        total_in_db = coll.count_documents({})
 
     client.close()
-    print(f"Inserted {product_count} products for {handle}: {summary}")
+
+    summary = {
+        "category": category,
+        "subcategory": subcategory,
+        "type": type,
+        "handle": handle,
+        "inserted": len(docs),
+        "total_in_db": total_in_db,
+    }
+    print(f"Inserted {len(docs)} products for {handle}: {summary}")
     return summary
