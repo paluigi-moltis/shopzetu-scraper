@@ -15,6 +15,7 @@ Windmill flow:
     Step 2 output  →  this script
 """
 
+from datetime import date
 from typing import Any
 
 from pymongo import ASCENDING, MongoClient, UpdateOne
@@ -57,12 +58,17 @@ def main(
     coll.create_index([("handle", ASCENDING)])
     coll.create_index([("brand", ASCENDING)])
 
+    today = date.today().isoformat()  # "2026-08-07"
+
     ops: list[UpdateOne] = []
 
     for product in products:
         product_id = product["product_id"]
         # Separate the category_path so it goes into the aggregate array
         cat_path = product.pop("category_path", None)
+
+        # Add scraped_at as date string
+        product["scraped_at"] = today
 
         update_doc: dict[str, Any] = {"$set": product}
         if cat_path:
